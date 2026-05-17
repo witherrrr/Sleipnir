@@ -18,6 +18,7 @@
 #include "sleipnir/optimization/solver/sqp_matrix_callbacks.hpp"
 #include "sleipnir/optimization/solver/util/append_as_triplets.hpp"
 #include "sleipnir/optimization/solver/util/lagrange_multiplier_estimate.hpp"
+#include "sleipnir/util/print.hpp"
 
 namespace slp {
 
@@ -169,6 +170,21 @@ ExitStatus feasibility_restoration(
 
   Scalar fr_μ = std::max(μ, c_e.template lpNorm<Eigen::Infinity>());
 
+#ifndef SLEIPNIR_DISABLE_DIAGNOSTICS
+  const DenseVector fr_x_init = fr_x;
+  slp::println(
+      "[feas_rest/SQP] enter: n_vars={} n_eq={} rho={:.1e} mu={:.3e} "
+      "zeta={:.3e} fr_mu={:.3e}\n"
+      "                ||c_e||inf={:.3e} ||c_e||2={:.3e} ||x_r||inf={:.3e}\n"
+      "                p_e_0[min={:.3e}] n_e_0[min={:.3e}] fr_z[max={:.3e}] "
+      "D_r[min={:.3e} max={:.3e}]",
+      num_vars, num_eq, ρ, μ, ζ, fr_μ,
+      c_e.template lpNorm<Eigen::Infinity>(), c_e.norm(),
+      x_r.template lpNorm<Eigen::Infinity>(), p_e_0.minCoeff(),
+      n_e_0.minCoeff(), fr_z.maxCoeff(), D_r.diagonal().minCoeff(),
+      D_r.diagonal().maxCoeff());
+#endif
+
   InteriorPointMatrixCallbacks<Scalar> fr_matrix_callbacks{
       static_cast<int>(fr_x.rows()),
       static_cast<int>(fr_y.rows()),
@@ -289,14 +305,59 @@ ExitStatus feasibility_restoration(
         return A_i_p;
       }};
 
-  auto status = interior_point<Scalar>(fr_matrix_callbacks, iteration_callbacks,
-                                       options, true,
+  gch::small_vector<std::function<bool(const IterationInfo<Scalar>&)>>
+      fr_iteration_callbacks{iteration_callbacks.begin(),
+                             iteration_callbacks.end()};
+#ifndef SLEIPNIR_DISABLE_DIAGNOSTICS
+  fr_iteration_callbacks.emplace_back(
+      [&](const IterationInfo<Scalar>& info) -> bool {
+        const DenseVector x = info.x.segment(0, num_vars);
+        auto p_e = info.x.segment(num_vars, num_eq);
+        auto n_e = info.x.segment(num_vars + num_eq, num_eq);
+        const DenseVector c_e_x = matrices.c_e(x);
+        const DenseVector diff = x - x_r;
+        slp::println(
+            "[feas_rest/SQP iter {}] orig ||c_e||inf={:.3e} | relaxed "
+            "||c_e-p_e+n_e||inf={:.3e}\n"
+            "                        relax_L1={:.3e} "
+            "min_slack(p_e,n_e)={:.3e} | ||x-x_r||inf={:.3e} prox={:.3e}",
+            info.iteration, c_e_x.template lpNorm<Eigen::Infinity>(),
+            (c_e_x - p_e + n_e).template lpNorm<Eigen::Infinity>(),
+            p_e.template lpNorm<1>() + n_e.template lpNorm<1>(),
+            std::min(p_e.minCoeff(), n_e.minCoeff()),
+            diff.template lpNorm<Eigen::Infinity>(),
+            ζ / Scalar(2) * diff.dot(D_r * diff));
+        return false;
+      });
+#endif
+
+  auto status = interior_point<Scalar>(fr_matrix_callbacks,
+                                       fr_iteration_callbacks, options, true,
 #ifdef SLEIPNIR_ENABLE_BOUND_PROJECTION
                                        {},
 #endif
                                        fr_x, fr_s, fr_y, fr_z, fr_μ);
 
   x = fr_x.segment(0, x.rows());
+
+#ifndef SLEIPNIR_DISABLE_DIAGNOSTICS
+  {
+    const DenseVector c_e_final = matrices.c_e(x);
+    const ExitStatus mapped =
+        status == ExitStatus::CALLBACK_REQUESTED_STOP ? ExitStatus::SUCCESS
+        : status == ExitStatus::SUCCESS ? ExitStatus::LOCALLY_INFEASIBLE
+                                        : ExitStatus::FEASIBILITY_RESTORATION_FAILED;
+    slp::println(
+        "[feas_rest/SQP] exit: inner_status=\"{}\" -> returning \"{}\"\n"
+        "                ||c_e||inf {:.3e} -> {:.3e} | ||c_e||2 {:.3e} -> "
+        "{:.3e} | ||dx||inf={:.3e}",
+        status, mapped, c_e.template lpNorm<Eigen::Infinity>(),
+        c_e_final.template lpNorm<Eigen::Infinity>(), c_e.norm(),
+        c_e_final.norm(),
+        (fr_x.segment(0, num_vars) - fr_x_init.segment(0, num_vars))
+            .template lpNorm<Eigen::Infinity>());
+  }
+#endif
 
   if (status == ExitStatus::CALLBACK_REQUESTED_STOP) {
     auto g = matrices.g(x);
@@ -400,6 +461,24 @@ ExitStatus feasibility_restoration(
 
   Scalar fr_μ = std::max({μ, c_e.template lpNorm<Eigen::Infinity>(),
                           (c_i - s).template lpNorm<Eigen::Infinity>()});
+
+#ifndef SLEIPNIR_DISABLE_DIAGNOSTICS
+  const DenseVector fr_x_init = fr_x;
+  const DenseVector c_i_s_init = c_i - s;
+  slp::println(
+      "[feas_rest/IP] enter: n_vars={} n_eq={} n_ineq={} rho={:.1e} "
+      "mu={:.3e} zeta={:.3e} fr_mu={:.3e}\n"
+      "               ||c_e||inf={:.3e} ||c_i-s||inf={:.3e} ||x_r||inf={:.3e}\n"
+      "               p_e_0[min={:.3e}] n_e_0[min={:.3e}] p_i_0[min={:.3e}] "
+      "n_i_0[min={:.3e}]\n"
+      "               fr_z[min={:.3e} max={:.3e}] D_r[min={:.3e} max={:.3e}]",
+      num_vars, num_eq, num_ineq, ρ, μ, ζ, fr_μ,
+      c_e.template lpNorm<Eigen::Infinity>(),
+      c_i_s_init.template lpNorm<Eigen::Infinity>(),
+      x_r.template lpNorm<Eigen::Infinity>(), p_e_0.minCoeff(),
+      n_e_0.minCoeff(), p_i_0.minCoeff(), n_i_0.minCoeff(), fr_z.minCoeff(),
+      fr_z.maxCoeff(), D_r.diagonal().minCoeff(), D_r.diagonal().maxCoeff());
+#endif
 
   InteriorPointMatrixCallbacks<Scalar> fr_matrix_callbacks{
       static_cast<int>(fr_x.rows()),
@@ -564,8 +643,40 @@ ExitStatus feasibility_restoration(
         return A_i_p;
       }};
 
-  auto status = interior_point<Scalar>(fr_matrix_callbacks, iteration_callbacks,
-                                       options, true,
+  gch::small_vector<std::function<bool(const IterationInfo<Scalar>&)>>
+      fr_iteration_callbacks{iteration_callbacks.begin(),
+                             iteration_callbacks.end()};
+#ifndef SLEIPNIR_DISABLE_DIAGNOSTICS
+  fr_iteration_callbacks.emplace_back(
+      [&](const IterationInfo<Scalar>& info) -> bool {
+        const DenseVector x = info.x.segment(0, num_vars);
+        auto p_e = info.x.segment(num_vars, num_eq);
+        auto n_e = info.x.segment(num_vars + num_eq, num_eq);
+        auto p_i = info.x.segment(num_vars + 2 * num_eq, num_ineq);
+        auto n_i = info.x.segment(num_vars + 2 * num_eq + num_ineq, num_ineq);
+        const DenseVector c_e_x = matrices.c_e(x);
+        const DenseVector c_i_x = matrices.c_i(x);
+        const DenseVector diff = x - x_r;
+        slp::println(
+            "[feas_rest/IP iter {}] orig ||c_e||inf={:.3e} ||c_i-s||inf={:.3e} "
+            "| relaxed ||c_e-p_e+n_e||inf={:.3e}\n"
+            "                       relax_L1={:.3e} min_slack={:.3e} | "
+            "||x-x_r||inf={:.3e} prox={:.3e}",
+            info.iteration, c_e_x.template lpNorm<Eigen::Infinity>(),
+            (c_i_x - s).template lpNorm<Eigen::Infinity>(),
+            (c_e_x - p_e + n_e).template lpNorm<Eigen::Infinity>(),
+            p_e.template lpNorm<1>() + n_e.template lpNorm<1>() +
+                p_i.template lpNorm<1>() + n_i.template lpNorm<1>(),
+            std::min({p_e.minCoeff(), n_e.minCoeff(), p_i.minCoeff(),
+                      n_i.minCoeff()}),
+            diff.template lpNorm<Eigen::Infinity>(),
+            ζ / Scalar(2) * diff.dot(D_r * diff));
+        return false;
+      });
+#endif
+
+  auto status = interior_point<Scalar>(fr_matrix_callbacks,
+                                       fr_iteration_callbacks, options, true,
 #ifdef SLEIPNIR_ENABLE_BOUND_PROJECTION
                                        {},
 #endif
@@ -573,6 +684,27 @@ ExitStatus feasibility_restoration(
 
   x = fr_x.segment(0, x.rows());
   s = fr_s.segment(0, s.rows());
+
+#ifndef SLEIPNIR_DISABLE_DIAGNOSTICS
+  {
+    const DenseVector c_e_final = matrices.c_e(x);
+    const DenseVector c_i_s_final = matrices.c_i(x) - s;
+    const ExitStatus mapped =
+        status == ExitStatus::CALLBACK_REQUESTED_STOP ? ExitStatus::SUCCESS
+        : status == ExitStatus::SUCCESS ? ExitStatus::LOCALLY_INFEASIBLE
+                                        : ExitStatus::FEASIBILITY_RESTORATION_FAILED;
+    slp::println(
+        "[feas_rest/IP] exit: inner_status=\"{}\" -> returning \"{}\"\n"
+        "               ||c_e||inf {:.3e} -> {:.3e} | ||c_i-s||inf {:.3e} -> "
+        "{:.3e} | ||dx||inf={:.3e}",
+        status, mapped, c_e.template lpNorm<Eigen::Infinity>(),
+        c_e_final.template lpNorm<Eigen::Infinity>(),
+        c_i_s_init.template lpNorm<Eigen::Infinity>(),
+        c_i_s_final.template lpNorm<Eigen::Infinity>(),
+        (fr_x.segment(0, num_vars) - fr_x_init.segment(0, num_vars))
+            .template lpNorm<Eigen::Infinity>());
+  }
+#endif
 
   if (status == ExitStatus::CALLBACK_REQUESTED_STOP) {
     auto g = matrices.g(x);

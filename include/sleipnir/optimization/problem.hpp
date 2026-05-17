@@ -595,47 +595,104 @@ class Problem {
       project_onto_bounds(x, bounds);
 #endif
 
+      // Scale the objective and each constraint so the largest gradient
+      // component at the starting point is at most gₘₐₓ:
+      //
+      //   d_f    = min(1, gₘₐₓ / ‖∇f(x₀)‖_∞)
+      //   d_c[j] = min(1, gₘₐₓ / ‖∇cⱼ(x₀)‖_∞)
+      //
+      // See §3.8 of [2].
+      constexpr Scalar g_max(100);
+
+      x_ad.set_value(x);
+      const DenseVector g_0 = g.value();
+      const SparseMatrix A_e_0 = A_e.value();
+      const SparseMatrix A_i_0 = A_i.value();
+
+      auto row_inf_norms = [](const SparseMatrix& A, int rows) {
+        DenseVector norms = DenseVector::Zero(rows);
+        for (int k = 0; k < A.outerSize(); ++k) {
+          for (typename SparseMatrix::InnerIterator it{A, k}; it; ++it) {
+            using std::abs;
+            norms[it.row()] = std::max(norms[it.row()], abs(it.value()));
+          }
+        }
+        return norms;
+      };
+
+      const Scalar grad_f_inf = g_0.template lpNorm<Eigen::Infinity>();
+      const Scalar d_f = grad_f_inf > Scalar(0)
+                             ? std::min(Scalar(1), g_max / grad_f_inf)
+                             : Scalar(1);
+
+      const DenseVector d_c_e =
+          (g_max / row_inf_norms(A_e_0, num_equality_constraints).array())
+              .min(Scalar(1))
+              .matrix();
+      const DenseVector d_c_i =
+          (g_max / row_inf_norms(A_i_0, num_inequality_constraints).array())
+              .min(Scalar(1))
+              .matrix();
+
+#ifndef SLEIPNIR_DISABLE_DIAGNOSTICS
+      if (options.diagnostics) {
+        slp::println(
+            "[scaling §3.8] ||grad_f||inf={:.3e} -> d_f={:.3e}\n"
+            "               eq:   d_c[min={:.3e} max={:.3e}] scaled(<1): "
+            "{}/{}\n"
+            "               ineq: d_c[min={:.3e} max={:.3e}] scaled(<1): "
+            "{}/{}",
+            grad_f_inf, d_f,
+            num_equality_constraints ? d_c_e.minCoeff() : Scalar(1),
+            num_equality_constraints ? d_c_e.maxCoeff() : Scalar(1),
+            (d_c_e.array() < Scalar(1)).count(), num_equality_constraints,
+            num_inequality_constraints ? d_c_i.minCoeff() : Scalar(1),
+            num_inequality_constraints ? d_c_i.maxCoeff() : Scalar(1),
+            (d_c_i.array() < Scalar(1)).count(), num_inequality_constraints);
+      }
+#endif
+
       InteriorPointMatrixCallbacks<Scalar> matrix_callbacks{
           num_decision_variables,
           num_equality_constraints,
           num_inequality_constraints,
           [&](const DenseVector& x) -> Scalar {
             x_ad.set_value(x);
-            return f.value();
+            return d_f * f.value();
           },
           [&](const DenseVector& x) -> SparseVector {
             x_ad.set_value(x);
-            return g.value();
+            return d_f * g.value();
           },
           [&](const DenseVector& x, const DenseVector& y,
               const DenseVector& z) -> SparseMatrix {
             x_ad.set_value(x);
-            y_ad.set_value(y);
-            z_ad.set_value(z);
-            return H_f.value() + H_c.value();
+            y_ad.set_value((d_c_e.array() * y.array()).matrix());
+            z_ad.set_value((d_c_i.array() * z.array()).matrix());
+            return d_f * H_f.value() + H_c.value();
           },
           [&](const DenseVector& x, const DenseVector& y,
               const DenseVector& z) -> SparseMatrix {
             x_ad.set_value(x);
-            y_ad.set_value(y);
-            z_ad.set_value(z);
+            y_ad.set_value((d_c_e.array() * y.array()).matrix());
+            z_ad.set_value((d_c_i.array() * z.array()).matrix());
             return H_c.value();
           },
           [&](const DenseVector& x) -> DenseVector {
             x_ad.set_value(x);
-            return c_e_ad.value();
+            return d_c_e.asDiagonal() * c_e_ad.value();
           },
           [&](const DenseVector& x) -> SparseMatrix {
             x_ad.set_value(x);
-            return A_e.value();
+            return d_c_e.asDiagonal() * A_e.value();
           },
           [&](const DenseVector& x) -> DenseVector {
             x_ad.set_value(x);
-            return c_i_ad.value();
+            return d_c_i.asDiagonal() * c_i_ad.value();
           },
           [&](const DenseVector& x) -> SparseMatrix {
             x_ad.set_value(x);
-            return A_i.value();
+            return d_c_i.asDiagonal() * A_i.value();
           }};
 
       // Invoke interior-point method solver

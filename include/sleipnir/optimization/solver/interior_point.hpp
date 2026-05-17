@@ -357,6 +357,7 @@ ExitStatus interior_point(
       solver_prof.stop();
 
       if (in_feasibility_restoration) {
+        print_solver_diagnostics(solve_profilers);
         return;
       }
 
@@ -783,11 +784,24 @@ ExitStatus interior_point(
       // parameter value, decrease the barrier parameter further
       Scalar E_μ = kkt_error<Scalar, KKTErrorType::INF_NORM_SCALED>(
           g, A_e, c_e, A_i, c_i, s, y, z, μ);
+#ifndef SLEIPNIR_DISABLE_DIAGNOSTICS
+      const Scalar E_μ_gate = E_μ;
+      const Scalar μ_before = μ;
+#endif
       while (μ > μ_min && E_μ <= κ_ε * μ) {
         update_barrier_parameter_and_reset_filter();
         E_μ = kkt_error<Scalar, KKTErrorType::INF_NORM_SCALED>(g, A_e, c_e, A_i,
                                                                c_i, s, y, z, μ);
       }
+#ifndef SLEIPNIR_DISABLE_DIAGNOSTICS
+      if (in_feasibility_restoration) {
+        slp::println(
+            "      └ barrier gate: E_μ={:.3e} {} κ_ε·μ={:.3e}  μ:{:.3e}→{:.3e} "
+            "(μ_min={:.3e})",
+            E_μ_gate, E_μ_gate <= κ_ε * μ_before ? "≤" : ">", κ_ε * μ_before,
+            μ_before, μ, μ_min);
+      }
+#endif
     }
 
     inner_iter_profiler.stop();
@@ -805,6 +819,15 @@ ExitStatus interior_point(
           std::max(step.p_y.template lpNorm<Eigen::Infinity>(),
                    step.p_z.template lpNorm<Eigen::Infinity>()),
           α, α_max, α_reduction_factor, α_z);
+
+#ifndef SLEIPNIR_DISABLE_DIAGNOSTICS
+      if (in_feasibility_restoration) {
+        slp::println(
+            "      └ raw reg: δ={:.3e} γ={:.3e} μ={:.3e}",
+            solver.hessian_regularization(),
+            solver.constraint_regularization(), μ);
+      }
+#endif
     }
 
     ++iterations;

@@ -8,6 +8,7 @@
 #include <Eigen/SparseCore>
 
 #include "sleipnir/optimization/solver/util/inertia.hpp"
+#include "sleipnir/util/print.hpp"
 
 // See docs/algorithms.md#Works_cited for citation definitions
 
@@ -84,6 +85,7 @@ class RegularizedLDLT {
       if (Inertia{D} == ideal_inertia &&
           (D.cwiseAbs().array() >= Scalar(1e-4)).all()) {
         m_prev_δ = Scalar(0);
+        m_prev_γ = Scalar(0);
         return *this;
       }
     }
@@ -116,8 +118,9 @@ class RegularizedLDLT {
 
       if (m_info == Eigen::Success) {
         if (inertia == ideal_inertia) {
-          // If the inertia is ideal, store δ and return
+          // If the inertia is ideal, store δ and γ and return
           m_prev_δ = δ;
+          m_prev_γ = γ;
           return *this;
         } else if (inertia.zero > 0) {
           // If there's zero eigenvalues, increase δ and γ by an order of
@@ -143,6 +146,8 @@ class RegularizedLDLT {
       // If the Hessian perturbation is too high, report failure. This can be
       // caused by ill-conditioning.
       if (δ > Scalar(1e20) || γ > Scalar(1e20)) {
+        m_prev_δ = δ;
+        m_prev_γ = γ;
         m_info = Eigen::NumericalIssue;
         return *this;
       }
@@ -180,6 +185,11 @@ class RegularizedLDLT {
   /// @return Hessian regularization factor.
   Scalar hessian_regularization() const { return m_prev_δ; }
 
+  /// Returns the constraint regularization factor.
+  ///
+  /// @return Constraint regularization factor.
+  Scalar constraint_regularization() const { return m_prev_γ; }
+
  private:
   using SparseSolver = Eigen::SimplicialLDLT<SparseMatrix>;
   using DenseSolver = Eigen::LDLT<DenseMatrix>;
@@ -206,8 +216,13 @@ class RegularizedLDLT {
   /// The value of δ from the previous run of compute().
   Scalar m_prev_δ{0};
 
+  /// The value of γ from the previous run of compute().
+  Scalar m_prev_γ{0};
+
   // Number of non-zeros in LHS.
   int m_non_zeros = -1;
+
+  bool m_shape_printed = false;
 
   /// Computes factorization of a sparse matrix.
   ///
