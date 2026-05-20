@@ -183,13 +183,13 @@ class SparseRegularizedLDLT {
           γ = γ == Scalar(0) ? Scalar(1e-10) : γ * Scalar(10);
         }
       } else {
-        // If the decomposition failed, increase δ and γ
+        // If the decomposition failed, increase δ and reset γ
         slp::println(
             "[reg-LDLT]   attempt {}: factorize FAILED (info={}), δ={:.3e} "
             "γ={:.3e} -> branch: bump δ ×10 γ ×10",
             attempt, static_cast<int>(m_info), δ, γ);
         δ *= Scalar(10);
-        γ *= Scalar(10);
+        γ = Scalar(1e-10);
       }
       ++attempt;
     }

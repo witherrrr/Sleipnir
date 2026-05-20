@@ -134,9 +134,9 @@ class DenseRegularizedLDLT {
           γ = γ == Scalar(0) ? Scalar(1e-10) : γ * Scalar(10);
         }
       } else {
-        // If the decomposition failed, increase δ and γ
+        // If the decomposition failed, increase δ and reset γ
         δ *= Scalar(10);
-        γ *= Scalar(10);
+        γ = Scalar(1e-10);
       }
     }
   }
