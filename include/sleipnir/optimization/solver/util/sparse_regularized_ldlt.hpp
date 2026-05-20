@@ -7,6 +7,7 @@
 #include <Eigen/SparseCore>
 
 #include "sleipnir/optimization/solver/util/inertia.hpp"
+#include "sleipnir/util/print.hpp"
 
 // See docs/algorithms.md#Works_cited for citation definitions
 
@@ -93,8 +94,14 @@ class SparseRegularizedLDLT {
     // attempt a δ and γ half as big as the previous run so δ and γ can trend
     // downwards over time.
     Scalar δ = m_prev_δ == Scalar(0) ? Scalar(1e-4) : m_prev_δ / Scalar(2);
-    Scalar γ = m_γ_min;
+    Scalar γ = m_prev_γ == Scalar(0) ? m_γ_min : m_prev_γ / Scalar(2);
 
+    slp::println(
+        "[reg-LDLT] enter loop: ideal=({}+ {}, {}0), start δ={:.3e} γ={:.3e}",
+        ideal_inertia.positive, ideal_inertia.negative, ideal_inertia.zero,
+        δ, γ);
+
+    int attempt = 0;
     while (true) {
       m_solver.factorize(lhs + regularization(δ, γ));
       m_info = m_solver.info();
@@ -102,41 +109,89 @@ class SparseRegularizedLDLT {
       if (m_info == Eigen::Success) {
         Inertia inertia{m_solver.vectorD()};
 
+        slp::println(
+            "[reg-LDLT]   attempt {}: factorize OK, inertia=({}+ {}, {}0), "
+            "δ={:.3e} γ={:.3e}",
+            attempt, inertia.positive, inertia.negative, inertia.zero, δ,
+            γ);
+
         if (inertia == ideal_inertia) {
           // If the inertia is ideal, report success
+          slp::println(
+              "[reg-LDLT]   -> ideal inertia hit, return (δ={:.3e}, γ={:.3e})",
+              δ, γ);
           m_prev_δ = δ;
           m_prev_γ = γ;
           return *this;
         } else if (inertia.zero > 0) {
-          if (γ == Scalar(0)) {
-            // If there's zero eigenvalues and γ = 0, increase γ
-            γ = Scalar(1e-10);
-          } else {
-            // If there's zero eigenvalues and γ > 0, increase δ and γ
+          // If there's zero eigenvalues, check which type of inertia we need
+          slp::println("[reg-LDLT]   -> branch: ZERO eigenvalues ({}, {}-, {}+), need {} positive, {} negative",
+                       inertia.zero, inertia.negative, inertia.positive, ideal_inertia.positive,
+                       ideal_inertia.negative);
+          if (inertia.negative < ideal_inertia.negative &&
+              inertia.positive < ideal_inertia.positive) {
+            slp::println(
+                "[reg-LDLT]   -> subbranch: need more NEGATIVE and POSITIVE");
+            // If we need more negative and positive eigenvalues, increase both
+            // δ and γ by an order of magnitude and try again
             δ *= Scalar(10);
-            γ *= Scalar(10);
+            if (γ == Scalar(0)) {
+              γ = Scalar(1e-10);
+            } else {
+              γ *= Scalar(10);
+            }
+          } else if (inertia.negative < ideal_inertia.negative) {
+            slp::println(
+                "[reg-LDLT]   -> subbranch: need more NEGATIVE eigenvalues");
+            // If we need more negative eigenvalues, increase γ by an order of
+            // magnitude and try again
+            if (γ == Scalar(0)) {
+              γ = Scalar(1e-10);
+            } else {
+              γ *= Scalar(10);
+            }
+          } else if (inertia.positive < ideal_inertia.positive) {
+            slp::println(
+                "[reg-LDLT]   -> subbranch: need more POSITIVE eigenvalues");
+            // If we need more positive eigenvalues, increase δ by an order of
+            // magnitude and try again
+            δ *= Scalar(10);
+          } else {
+            slp::println(
+                "[reg-LDLT]   -> subbranch: zero eigenvalues only, bump both");
+            // If we have the right number of negative and positive eigenvalues,
+            // but some are zero, increase both δ and γ by an order of magnitude
+            // and try again
+            δ *= Scalar(10);
+            if (γ == Scalar(0)) {
+              γ = Scalar(1e-10);
+            } else {
+              γ *= Scalar(10);
+            }
           }
         } else if (inertia.negative > ideal_inertia.negative) {
           // If there's too many negative eigenvalues, increase δ
+          slp::println(
+              "[reg-LDLT]   -> branch: too many NEGATIVE ({} > {}), bump δ ×10",
+              inertia.negative, ideal_inertia.negative);
           δ *= Scalar(10);
         } else if (inertia.positive > ideal_inertia.positive) {
           // If there's too many positive eigenvalues, increase γ
+          slp::println(
+              "[reg-LDLT]   -> branch: too many POSITIVE ({} > {}), bump γ ×10",
+              inertia.positive, ideal_inertia.positive);
           γ = γ == Scalar(0) ? Scalar(1e-10) : γ * Scalar(10);
         }
       } else {
         // If the decomposition failed, increase δ and γ
+        slp::println(
+            "[reg-LDLT]   attempt {}: factorize FAILED (info={}), δ={:.3e} "
+            "γ={:.3e} -> branch: bump δ ×10 γ ×10",
+            attempt, static_cast<int>(m_info), δ, γ);
         δ *= Scalar(10);
         γ *= Scalar(10);
       }
-
-      // If the Hessian perturbation is too high, report failure. This can be
-      // caused by ill-conditioning.
-      if (δ > Scalar(1e20) || γ > Scalar(1e20)) {
-        m_info = Eigen::NumericalIssue;
-        m_prev_δ = δ;
-        m_prev_γ = γ;
-        return *this;
-      }
+      ++attempt;
     }
   }
 
