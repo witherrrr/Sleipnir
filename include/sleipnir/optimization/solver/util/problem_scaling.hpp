@@ -25,6 +25,9 @@ struct ProblemScaling {
   /// Type alias for sparse vector.
   using SparseVector = Eigen::SparseVector<Scalar>;
 
+  /// Default maximum scaled gradient inf-norm targeted by the auto-scaling.
+  static constexpr Scalar default_g_max = Scalar(100);
+
   /// Cost scaling factor d_f.
   Scalar f = Scalar(1);
 
@@ -55,9 +58,8 @@ struct ProblemScaling {
   /// See §3.8 Automatic Scaling of the Problem Statement in [2].
   ///
   /// @param g Cost gradient ∇f, evaluated at the starting point.
-  explicit ProblemScaling(const DenseVector& g) {
-    constexpr Scalar g_max(100);
-
+  /// @param g_max Maximum scaled gradient inf-norm.
+  explicit ProblemScaling(const DenseVector& g, Scalar g_max = default_g_max) {
     f = std::min(Scalar(1), g_max / g.template lpNorm<Eigen::Infinity>());
   }
 
@@ -74,9 +76,9 @@ struct ProblemScaling {
   /// @param g Cost gradient ∇f, evaluated at the starting point.
   /// @param A_e Equality constraint Jacobian Aₑ, evaluated at the starting
   ///     point.
-  ProblemScaling(const DenseVector& g, const SparseMatrix& A_e) {
-    constexpr Scalar g_max(100);
-
+  /// @param g_max Maximum scaled gradient inf-norm.
+  ProblemScaling(const DenseVector& g, const SparseMatrix& A_e,
+                 Scalar g_max = default_g_max) {
     f = std::min(Scalar(1), g_max / g.template lpNorm<Eigen::Infinity>());
     c_e = (g_max / sparse_inf_norms(A_e).array()).min(Scalar(1)).matrix();
   }
@@ -96,10 +98,9 @@ struct ProblemScaling {
   ///     point.
   /// @param A_i Inequality constraint Jacobian Aᵢ, evaluated at the starting
   ///     point.
+  /// @param g_max Maximum scaled gradient inf-norm.
   ProblemScaling(const DenseVector& g, const SparseMatrix& A_e,
-                 const SparseMatrix& A_i) {
-    constexpr Scalar g_max(100);
-
+                 const SparseMatrix& A_i, Scalar g_max = default_g_max) {
     f = std::min(Scalar(1), g_max / g.template lpNorm<Eigen::Infinity>());
     c_e = (g_max / sparse_inf_norms(A_e).array()).min(Scalar(1)).matrix();
     c_i = (g_max / sparse_inf_norms(A_i).array()).min(Scalar(1)).matrix();

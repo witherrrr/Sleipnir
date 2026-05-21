@@ -31,6 +31,7 @@
 #include "sleipnir/optimization/solver/sqp.hpp"
 #include "sleipnir/optimization/solver/util/bounds.hpp"
 #include "sleipnir/optimization/solver/util/problem_scaling.hpp"
+#include "sleipnir/optimization/solver/util/sparse_inf_norms.hpp"
 #include "sleipnir/util/empty.hpp"
 #include "sleipnir/util/print.hpp"
 #include "sleipnir/util/print_diagnostics.hpp"
@@ -376,10 +377,28 @@ class Problem {
       }
 #endif
 
-      // Automatically scale the cost. The problem scaling procedure is
-      // described in more detail in docs/algorithms.md#problem-scaling.
+      // Automatically scale the cost and constraints. We scale the problem
+      // initially, and re-scale the problem again if the gradients change
+      // excessively. The problem scaling procedure is described in more detail
+      // in docs/algorithms.md#problem-scaling.
+      constexpr Scalar initial_g_max(100);
+      constexpr Scalar restart_g_max(1000);
+
       x_ad.set_value(x);
-      const ProblemScaling<Scalar> scaling{g.value()};
+      ProblemScaling<Scalar> scaling{g.value(), initial_g_max};
+
+      bool rescale_requested = false;
+      bool rescale_in_fr = false;
+      iteration_callbacks.emplace_back(
+          [&](const IterationInfo<Scalar>& info) -> bool {
+            if (sparse_inf_norms(info.g).template lpNorm<Eigen::Infinity>() >
+                restart_g_max) {
+              rescale_requested = true;
+              rescale_in_fr = info.in_feasibility_restoration;
+              return true;
+            }
+            return false;
+          });
 
       NewtonMatrixCallbacks<Scalar> matrix_callbacks{
           num_decision_variables,
@@ -398,8 +417,29 @@ class Problem {
           scaling};
 
       // Invoke Newton solver
-      status =
-          newton<Scalar>(matrix_callbacks, iteration_callbacks, options, x);
+      while (true) {
+        rescale_requested = false;
+        rescale_in_fr = false;
+        status =
+            newton<Scalar>(matrix_callbacks, iteration_callbacks, options, x);
+
+        if (status != ExitStatus::CALLBACK_REQUESTED_STOP ||
+            !rescale_requested) {
+          break;
+        }
+
+        if (options.diagnostics) {
+          slp::println(
+              "\nScaled gradient inf-norm exceeded {} during {} iteration; "
+              "rescaling and restarting in normal mode\n",
+              restart_g_max,
+              rescale_in_fr ? "feasibility restoration" : "normal");
+        }
+
+        x_ad.set_value(x);
+        scaling = ProblemScaling<Scalar>{g.value(), initial_g_max};
+        matrix_callbacks.scaling = scaling;
+      }
     } else if (m_inequality_constraints.empty()) {
       if (options.diagnostics) {
         slp::println("\nInvoking SQP solver\n");
@@ -470,11 +510,30 @@ class Problem {
       }
 #endif
 
-      // Automatically scale the cost and constraints. The problem scaling
-      // procedure is described in more detail in
-      // docs/algorithms.md#problem-scaling.
+      // Automatically scale the cost and constraints. We scale the problem
+      // initially, and re-scale the problem again if the gradients change
+      // excessively. The problem scaling procedure is described in more detail
+      // in docs/algorithms.md#problem-scaling.
+      constexpr Scalar initial_g_max(100);
+      constexpr Scalar restart_g_max(1000);
+
       x_ad.set_value(x);
-      const ProblemScaling<Scalar> scaling{g.value(), A_e.value()};
+      ProblemScaling<Scalar> scaling{g.value(), A_e.value(), initial_g_max};
+
+      bool rescale_requested = false;
+      bool rescale_in_fr = false;
+      iteration_callbacks.emplace_back(
+          [&](const IterationInfo<Scalar>& info) -> bool {
+            Scalar inf = std::max(
+                sparse_inf_norms(info.g).template lpNorm<Eigen::Infinity>(),
+                sparse_inf_norms(info.A_e).template lpNorm<Eigen::Infinity>());
+            if (inf > restart_g_max) {
+              rescale_requested = true;
+              rescale_in_fr = info.in_feasibility_restoration;
+              return true;
+            }
+            return false;
+          });
 
       SQPMatrixCallbacks<Scalar> matrix_callbacks{
           num_decision_variables,
@@ -508,7 +567,28 @@ class Problem {
           scaling};
 
       // Invoke SQP solver
-      status = sqp<Scalar>(matrix_callbacks, iteration_callbacks, options, x);
+      while (true) {
+        rescale_requested = false;
+        rescale_in_fr = false;
+        status = sqp<Scalar>(matrix_callbacks, iteration_callbacks, options, x);
+
+        if (status != ExitStatus::CALLBACK_REQUESTED_STOP ||
+            !rescale_requested) {
+          break;
+        }
+
+        if (options.diagnostics) {
+          slp::println(
+              "\nScaled gradient inf-norm exceeded {} during {} iteration; "
+              "rescaling and restarting in normal mode\n",
+              restart_g_max,
+              rescale_in_fr ? "feasibility restoration" : "normal");
+        }
+
+        x_ad.set_value(x);
+        scaling = ProblemScaling<Scalar>{g.value(), A_e.value(), initial_g_max};
+        matrix_callbacks.scaling = scaling;
+      }
     } else {
       if (options.diagnostics) {
         slp::println("\nInvoking IPM solver\n");
@@ -609,11 +689,35 @@ class Problem {
       project_onto_bounds(x, bounds);
 #endif
 
-      // Automatically scale the cost and constraints. The problem scaling
-      // procedure is described in more detail in
-      // docs/algorithms.md#problem-scaling.
+      // Automatically scale the cost and constraints. We scale the problem
+      // initially, and re-scale the problem again if the gradients change
+      // excessively. The problem scaling procedure is described in more detail
+      // in docs/algorithms.md#problem-scaling.
+      constexpr Scalar initial_g_max(100);
+      constexpr Scalar restart_g_max(1000);
+
       x_ad.set_value(x);
-      const ProblemScaling<Scalar> scaling{g.value(), A_e.value(), A_i.value()};
+      ProblemScaling<Scalar> scaling{g.value(), A_e.value(), A_i.value(),
+                                     initial_g_max};
+
+      bool rescale_requested = false;
+      bool rescale_in_fr = false;
+      iteration_callbacks.emplace_back([&](const IterationInfo<Scalar>& info)
+                                           -> bool {
+        auto max_norm = [](const auto& mat) -> Scalar {
+          return mat.rows() > 0
+                     ? sparse_inf_norms(mat).template lpNorm<Eigen::Infinity>()
+                     : Scalar(0);
+        };
+        Scalar inf = std::max(
+            {max_norm(info.g), max_norm(info.A_e), max_norm(info.A_i)});
+        if (inf > restart_g_max) {
+          rescale_requested = true;
+          rescale_in_fr = info.in_feasibility_restoration;
+          return true;
+        }
+        return false;
+      });
 
       InteriorPointMatrixCallbacks<Scalar> matrix_callbacks{
           num_decision_variables,
@@ -660,12 +764,34 @@ class Problem {
           scaling};
 
       // Invoke interior-point method solver
-      status =
-          interior_point<Scalar>(matrix_callbacks, iteration_callbacks, options,
+      while (true) {
+        rescale_requested = false;
+        rescale_in_fr = false;
+        status = interior_point<Scalar>(matrix_callbacks, iteration_callbacks,
+                                        options,
 #ifdef SLEIPNIR_ENABLE_BOUND_PROJECTION
-                                 bound_constraint_mask,
+                                        bound_constraint_mask,
 #endif
-                                 x);
+                                        x);
+
+        if (status != ExitStatus::CALLBACK_REQUESTED_STOP ||
+            !rescale_requested) {
+          break;
+        }
+
+        if (options.diagnostics) {
+          slp::println(
+              "\nScaled gradient inf-norm exceeded {} during {} iteration; "
+              "rescaling and restarting in normal mode\n",
+              restart_g_max,
+              rescale_in_fr ? "feasibility restoration" : "normal");
+        }
+
+        x_ad.set_value(x);
+        scaling = ProblemScaling<Scalar>{g.value(), A_e.value(), A_i.value(),
+                                         initial_g_max};
+        matrix_callbacks.scaling = scaling;
+      }
     }
 
     if (options.diagnostics) {

@@ -128,15 +128,6 @@ class SparseRegularizedLDLT {
         δ *= Scalar(10);
         γ *= Scalar(10);
       }
-
-      // If the Hessian perturbation is too high, report failure. This can be
-      // caused by ill-conditioning.
-      if (δ > Scalar(1e20) || γ > Scalar(1e20)) {
-        m_info = Eigen::NumericalIssue;
-        m_prev_δ = δ;
-        m_prev_γ = γ;
-        return *this;
-      }
     }
   }
 

@@ -355,6 +355,11 @@ static const char *__doc_slp_IterationInfo_H = R"doc(The Hessian of the Lagrangi
 
 static const char *__doc_slp_IterationInfo_g = R"doc(The gradient of the cost function.)doc";
 
+static const char *__doc_slp_IterationInfo_in_feasibility_restoration =
+R"doc(Whether the solver is in the feasibility restoration phase. When true,
+f/g/H/A_e/A_i describe the feasibility restoration sub-problem rather
+than the original problem.)doc";
+
 static const char *__doc_slp_IterationInfo_iteration = R"doc(The solver iteration.)doc";
 
 static const char *__doc_slp_IterationInfo_s = R"doc(The inequality constraint slack variables.)doc";

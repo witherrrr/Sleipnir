@@ -17,7 +17,6 @@
 #include "sleipnir/optimization/solver/options.hpp"
 #include "sleipnir/optimization/solver/sqp_matrix_callbacks.hpp"
 #include "sleipnir/optimization/solver/util/append_as_triplets.hpp"
-#include "sleipnir/optimization/solver/util/lagrange_multiplier_estimate.hpp"
 
 namespace slp {
 
@@ -107,16 +106,13 @@ compute_p_n(const Eigen::Vector<Scalar, Eigen::Dynamic>& c, Scalar ρ,
 ///     beginning of each iteration.
 /// @param[in] options Solver options.
 /// @param[in,out] x The decision variables from the normal solve.
-/// @param[in,out] y The equality constraint dual variables from the normal
-///     solve.
 /// @return The exit status.
 template <typename Scalar>
 ExitStatus feasibility_restoration(
     const SQPMatrixCallbacks<Scalar>& matrix_callbacks,
     std::span<std::function<bool(const IterationInfo<Scalar>& info)>>
         iteration_callbacks,
-    const Options& options, Eigen::Vector<Scalar, Eigen::Dynamic>& x,
-    Eigen::Vector<Scalar, Eigen::Dynamic>& y) {
+    const Options& options, Eigen::Vector<Scalar, Eigen::Dynamic>& x) {
   // Feasibility restoration
   //
   //        min  ρ Σ (pₑ + nₑ) + ζ/2 (x - xᵣ)ᵀDᵣ(x - xᵣ)
@@ -306,18 +302,10 @@ ExitStatus feasibility_restoration(
 
   x = fr_x.segment(0, x.rows());
 
-  if (status == ExitStatus::CALLBACK_REQUESTED_STOP) {
-    auto g = matrices.g(x);
-    auto A_e = matrices.A_e(x);
-
-    y = lagrange_multiplier_estimate(g, A_e);
-
-    return ExitStatus::SUCCESS;
-  } else if (status == ExitStatus::SUCCESS) {
+  if (status == ExitStatus::SUCCESS) {
     return ExitStatus::LOCALLY_INFEASIBLE;
-  } else {
-    return ExitStatus::FEASIBILITY_RESTORATION_FAILED;
   }
+  return status;
 }
 
 /// Finds the iterate that minimizes the constraint violation while not
@@ -332,10 +320,6 @@ ExitStatus feasibility_restoration(
 /// @param[in,out] x The current decision variables from the normal solve.
 /// @param[in,out] s The current inequality constraint slack variables from the
 ///     normal solve.
-/// @param[in,out] y The current equality constraint duals from the normal
-///     solve.
-/// @param[in,out] z The current inequality constraint duals from the normal
-///     solve.
 /// @param[in] μ Barrier parameter.
 /// @return The exit status.
 template <typename Scalar>
@@ -344,9 +328,7 @@ ExitStatus feasibility_restoration(
     std::span<std::function<bool(const IterationInfo<Scalar>& info)>>
         iteration_callbacks,
     const Options& options, Eigen::Vector<Scalar, Eigen::Dynamic>& x,
-    Eigen::Vector<Scalar, Eigen::Dynamic>& s,
-    Eigen::Vector<Scalar, Eigen::Dynamic>& y,
-    Eigen::Vector<Scalar, Eigen::Dynamic>& z, Scalar μ) {
+    Eigen::Vector<Scalar, Eigen::Dynamic>& s, Scalar μ) {
   // Feasibility restoration
   //
   //        min  ρ Σ (pₑ + nₑ + pᵢ + nᵢ) + ζ/2 (x - xᵣ)ᵀDᵣ(x - xᵣ)
@@ -594,22 +576,10 @@ ExitStatus feasibility_restoration(
   x = fr_x.segment(0, x.rows());
   s = fr_s.segment(0, s.rows());
 
-  if (status == ExitStatus::CALLBACK_REQUESTED_STOP) {
-    auto g = matrices.g(x);
-    auto A_e = matrices.A_e(x);
-    auto A_i = matrices.A_i(x);
-
-    auto [y_estimate, z_estimate] =
-        lagrange_multiplier_estimate(g, A_e, A_i, s, μ);
-    y = y_estimate;
-    z = z_estimate;
-
-    return ExitStatus::SUCCESS;
-  } else if (status == ExitStatus::SUCCESS) {
+  if (status == ExitStatus::SUCCESS) {
     return ExitStatus::LOCALLY_INFEASIBLE;
-  } else {
-    return ExitStatus::FEASIBILITY_RESTORATION_FAILED;
   }
+  return status;
 }
 
 }  // namespace slp

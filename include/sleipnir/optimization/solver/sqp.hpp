@@ -21,6 +21,7 @@
 #include "sleipnir/optimization/solver/util/filter.hpp"
 #include "sleipnir/optimization/solver/util/is_locally_infeasible.hpp"
 #include "sleipnir/optimization/solver/util/kkt_error.hpp"
+#include "sleipnir/optimization/solver/util/lagrange_multiplier_estimate.hpp"
 #include "sleipnir/optimization/solver/util/regularized_ldlt.hpp"
 #include "sleipnir/util/assert.hpp"
 #include "sleipnir/util/print_diagnostics.hpp"
@@ -519,6 +520,9 @@ ExitStatus sqp(const SQPMatrixCallbacks<Scalar>& matrix_callbacks,
       for (auto& callback : iteration_callbacks) {
         callbacks.emplace_back(callback);
       }
+      // Tracks whether FR exited because the filter-acceptance callback below
+      // fired (vs. some other callback like an external rescale monitor).
+      bool fr_filter_accepted = false;
       callbacks.emplace_back([&](const IterationInfo<Scalar>& info) {
         DenseVector trial_x =
             info.x.segment(0, matrices.num_decision_variables);
@@ -529,15 +533,27 @@ ExitStatus sqp(const SQPMatrixCallbacks<Scalar>& matrix_callbacks,
 
         // If the current iterate sufficiently reduces constraint violation and
         // is accepted by the normal filter, stop feasibility restoration
-        return trial_entry.constraint_violation <
-                   Scalar(0.9) * initial_entry.constraint_violation &&
-               filter.try_add(initial_entry, trial_entry, trial_x - x, g, α);
+        bool accepted =
+            trial_entry.constraint_violation <
+                Scalar(0.9) * initial_entry.constraint_violation &&
+            filter.try_add(initial_entry, trial_entry, trial_x - x, g, α);
+        if (accepted) {
+          fr_filter_accepted = true;
+        }
+        return accepted;
       });
       auto status =
-          feasibility_restoration<Scalar>(matrices, callbacks, options, x, y);
+          feasibility_restoration<Scalar>(matrices, callbacks, options, x);
 
-      if (status != ExitStatus::SUCCESS) {
-        // Report failure
+      if (status == ExitStatus::CALLBACK_REQUESTED_STOP && fr_filter_accepted) {
+        // FR found a filter-acceptable iterate. Estimate fresh y so the main
+        // loop can continue from here.
+        auto g_orig = matrices.g(x);
+        auto A_e_orig = matrices.A_e(x);
+        y = lagrange_multiplier_estimate(g_orig, A_e_orig);
+      } else {
+        // Either a real FR failure or an external callback stop (e.g., the
+        // rescale monitor in problem.hpp). Propagate it up.
         return status;
       }
 

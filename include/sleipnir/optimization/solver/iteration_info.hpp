@@ -38,6 +38,11 @@ struct IterationInfo {
 
   /// The inequality constraint Jacobian.
   const Eigen::SparseMatrix<Scalar>& A_i;
+
+  /// Whether the solver is in the feasibility restoration phase. When true,
+  /// f/g/H/A_e/A_i describe the feasibility restoration sub-problem rather
+  /// than the original problem.
+  bool in_feasibility_restoration = false;
 };
 
 }  // namespace slp

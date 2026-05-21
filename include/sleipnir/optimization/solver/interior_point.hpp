@@ -23,6 +23,7 @@
 #include "sleipnir/optimization/solver/util/fraction_to_the_boundary_rule.hpp"
 #include "sleipnir/optimization/solver/util/is_locally_infeasible.hpp"
 #include "sleipnir/optimization/solver/util/kkt_error.hpp"
+#include "sleipnir/optimization/solver/util/lagrange_multiplier_estimate.hpp"
 #include "sleipnir/optimization/solver/util/regularized_ldlt.hpp"
 #include "sleipnir/util/assert.hpp"
 #include "sleipnir/util/print_diagnostics.hpp"
@@ -412,7 +413,8 @@ ExitStatus interior_point(
 
     // Call iteration callbacks
     for (const auto& callback : iteration_callbacks) {
-      if (callback({iterations, x, s, y, z, g, H, A_e, A_i})) {
+      if (callback({iterations, x, s, y, z, g, H, A_e, A_i,
+                    in_feasibility_restoration})) {
         return ExitStatus::CALLBACK_REQUESTED_STOP;
       }
     }
@@ -718,6 +720,8 @@ ExitStatus interior_point(
       for (auto& callback : iteration_callbacks) {
         callbacks.emplace_back(callback);
       }
+
+      bool fr_filter_accepted = false;
       callbacks.emplace_back([&](const IterationInfo<Scalar>& info) {
         DenseVector trial_x =
             info.x.segment(0, matrices.num_decision_variables);
@@ -731,15 +735,27 @@ ExitStatus interior_point(
         // is accepted by the normal filter, stop feasibility restoration
         FilterEntry trial_entry{matrices.f(trial_x), trial_s, trial_c_e,
                                 trial_c_i, μ};
-        return trial_entry.constraint_violation <
-                   Scalar(0.9) * initial_entry.constraint_violation &&
-               filter.try_add(initial_entry, trial_entry, trial_x - x, g, α);
+        bool accepted =
+            trial_entry.constraint_violation <
+                Scalar(0.9) * initial_entry.constraint_violation &&
+            filter.try_add(initial_entry, trial_entry, trial_x - x, g, α);
+        if (accepted) {
+          fr_filter_accepted = true;
+        }
+        return accepted;
       });
       auto status = feasibility_restoration<Scalar>(matrices, callbacks,
-                                                    options, x, s, y, z, μ);
+                                                    options, x, s, μ);
 
-      if (status != ExitStatus::SUCCESS) {
-        // Report failure
+      if (status == ExitStatus::CALLBACK_REQUESTED_STOP && fr_filter_accepted) {
+        auto g_orig = matrices.g(x);
+        auto A_e_orig = matrices.A_e(x);
+        auto A_i_orig = matrices.A_i(x);
+        auto [y_est, z_est] =
+            lagrange_multiplier_estimate(g_orig, A_e_orig, A_i_orig, s, μ);
+        y = y_est;
+        z = z_est;
+      } else {
         return status;
       }
 
