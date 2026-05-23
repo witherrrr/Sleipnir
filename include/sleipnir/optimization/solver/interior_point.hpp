@@ -496,7 +496,7 @@ ExitStatus interior_point(
     // αₖᶻ = max(α ∈ (0, 1] : zₖ + αpₖᶻ ≥ (1−τⱼ)zₖ)
     α_z = fraction_to_the_boundary_rule<Scalar>(z, step.p_z, τ);
 
-    const FilterEntry<Scalar> current_entry{f, s, c_e, c_i, μ};
+    const FilterEntry<Scalar> current_entry{f, s, c_e, c_i, μ, μ * Scalar(1e-3)};
 
     // Compute the directional derivative of the log-barrier function along the
     // search direction.
@@ -542,7 +542,7 @@ ExitStatus interior_point(
       }
 
       // Check whether filter accepts trial iterate
-      FilterEntry trial_entry{trial_f, trial_s, trial_c_e, trial_c_i, μ};
+      FilterEntry trial_entry{trial_f, trial_s, trial_c_e, trial_c_i, μ, μ * Scalar(1e-3)};
       if (filter.try_add(current_entry, trial_entry, D_ϕ, α)) {
         // Accept step
         break;
@@ -633,7 +633,7 @@ ExitStatus interior_point(
           trial_c_i = matrices.c_i(trial_x);
 
           // Check whether filter accepts trial iterate
-          FilterEntry trial_entry{trial_f, trial_s, trial_c_e, trial_c_i, μ};
+          FilterEntry trial_entry{trial_f, trial_s, trial_c_e, trial_c_i, μ, μ * Scalar(1e-3)};
           if (filter.try_add(current_entry, trial_entry, D_ϕ, α)) {
             step = soc_step;
             α = α_soc;
@@ -727,7 +727,7 @@ ExitStatus interior_point(
         return ExitStatus::FEASIBILITY_RESTORATION_FAILED;
       }
 
-      FilterEntry initial_entry{matrices.f(x), s, c_e, c_i, μ};
+      FilterEntry initial_entry{matrices.f(x), s, c_e, c_i, μ, μ * Scalar(1e-3)};
 
       // Feasibility restoration phase
       gch::small_vector<std::function<bool(const IterationInfo<Scalar>& info)>>
@@ -747,7 +747,7 @@ ExitStatus interior_point(
         // If the current iterate sufficiently reduces constraint violation and
         // is accepted by the normal filter, stop feasibility restoration
         FilterEntry trial_entry{matrices.f(trial_x), trial_s, trial_c_e,
-                                trial_c_i, μ};
+                                trial_c_i, μ, μ * Scalar(1e-3)};
         const Scalar D_ϕ_restoration = g.transpose() * (trial_x - x) -
                                        μ * s.cwiseInverse().dot(trial_s - s);
         return trial_entry.constraint_violation <
@@ -780,6 +780,10 @@ ExitStatus interior_point(
       s = trial_s;
       y = trial_y;
       z = trial_z;
+
+      for (int i = 0; i < s.rows(); ++i) {
+        s[i] = std::max(s[i], c_i[i] - matrices.scaling.f * options.tolerance * z[i]);
+      }
 
       // A requirement for the convergence proof is that the primal-dual barrier
       // term Hessian Σₖ₊₁ does not deviate arbitrarily much from the primal

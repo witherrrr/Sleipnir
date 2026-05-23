@@ -51,8 +51,8 @@ struct FilterEntry {
   /// @param c_i The inequality constraint values (negative means violation).
   /// @param μ The barrier parameter.
   FilterEntry(Scalar f, DenseVector& s, const DenseVector& c_e,
-              const DenseVector& c_i, Scalar μ)
-      : FilterEntry{f - μ * s.array().log().sum(),
+              const DenseVector& c_i, Scalar μ, Scalar μ_B = Scalar(0))
+      : FilterEntry{f - μ * (s.array() + μ_B).log().sum(),
                     c_e.template lpNorm<1>() + (c_i - s).template lpNorm<1>()} {
   }
 
