@@ -162,6 +162,10 @@ struct Expression {
       return rhs;
     } else if (rhs->is_constant(Scalar(1))) {
       return lhs;
+    } else if (lhs->is_constant(Scalar(-1))) {
+      return -rhs;
+    } else if (rhs->is_constant(Scalar(-1))) {
+      return -lhs;
     }
 
     // Evaluate constant
@@ -207,6 +211,8 @@ struct Expression {
       return lhs;
     } else if (rhs->is_constant(Scalar(1))) {
       return lhs;
+    } else if (rhs->is_constant(Scalar(-1))) {
+      return -lhs;
     }
 
     // Evaluate constant
