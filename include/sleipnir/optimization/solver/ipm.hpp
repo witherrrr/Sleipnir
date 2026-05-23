@@ -396,10 +396,13 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
     iter_callbacks_profiler.stop();
     ScopedProfiler kkt_matrix_build_profiler{kkt_matrix_build_prof};
 
-    // S = diag(s)
-    // Z = diag(z)
-    // Σ = S⁻¹Z
-    const SparseMatrix Σ{s.cwiseInverse().asDiagonal() * z.asDiagonal()};
+    const Scalar μ_B = μ * Scalar(1e-3);
+    DenseVector shifted_s = s.array() + μ_B;
+    const DenseVector inv_shifted_s = shifted_s.cwiseInverse();
+
+    const SparseMatrix Σ{inv_shifted_s.asDiagonal() * z.asDiagonal()};
+    const DenseVector barrier_rhs =
+        μ * inv_shifted_s - μ_B * z.cwiseProduct(inv_shifted_s);
 
     // lhs = [H + AᵢᵀΣAᵢ  Aₑᵀ]
     //       [    Aₑ       0 ]
@@ -415,12 +418,12 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
         matrices.num_decision_variables + matrices.num_equality_constraints);
     lhs.setFromSortedTriplets(triplets.begin(), triplets.end());
 
-    // rhs = −[∇f − Aₑᵀy − Aᵢᵀ(−Σcᵢ + μS⁻¹e + z)]
-    //        [               cₑ                ]
+    // rhs = −[∇f − Aₑᵀy − Aᵢᵀ(−Σcᵢ + (μ − μ_B z) ⊘ (s + μ_B) + z)]
+    //        [                       cₑ                          ]
     DenseVector rhs{x.rows() + y.rows()};
     rhs.segment(0, x.rows()) =
         -g + A_e.transpose() * y +
-        A_i.transpose() * (-Σ * c_i + μ * s.cwiseInverse() + z);
+        A_i.transpose() * (-Σ * c_i + barrier_rhs + z);
     rhs.segment(x.rows(), y.rows()) = -c_e;
 
     kkt_matrix_build_profiler.stop();
@@ -434,8 +437,8 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
 
     // Solve the Newton-KKT system
     //
-    // [H + AᵢᵀΣAᵢ  Aₑᵀ][ pˣ] = −[∇f − Aₑᵀy − Aᵢᵀ(−Σcᵢ + μS⁻¹e + z)]
-    // [    Aₑ       0 ][−pʸ]    [               cₑ                ]
+    // [H + AᵢᵀΣAᵢ  Aₑᵀ][ pˣ] = −[∇f − Aₑᵀy − Aᵢᵀ(−Σcᵢ + (μ − μ_B z) ⊘ (s + μ_B) + z)]
+    // [    Aₑ       0 ][−pʸ]    [                       cₑ                          ]
     if (solver.compute(lhs).info() != Eigen::Success) [[unlikely]] {
       return ExitStatus::FACTORIZATION_FAILED;
     }
@@ -450,10 +453,10 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
       step.p_x = p.segment(0, x.rows());
       step.p_y = -p.segment(x.rows(), y.rows());
 
-      // pˢ = cᵢ − s + Aᵢpˣ
-      // pᶻ = μS⁻¹e − z − Σpˢ
+      // pˢ = (cᵢ − s) + Aᵢpˣ
+      // pᶻ = μ ⊘ (s + μ_B) − z − Σpˢ
       step.p_s = c_i_minus_s + A_i * step.p_x;
-      step.p_z = μ * s.cwiseInverse() - z - Σ * step.p_s;
+      step.p_z = μ * inv_shifted_s - z - Σ * step.p_s;
     };
     compute_step(step, c_i - s);
 
@@ -461,7 +464,7 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
     ScopedProfiler line_search_profiler{line_search_prof};
 
     // αᵐᵃˣ = max(α ∈ (0, 1] : sₖ + αpₖˢ ≥ (1−τⱼ)sₖ)
-    α_max = fraction_to_the_boundary_rule<Scalar>(s, step.p_s, τ);
+    α_max = fraction_to_the_boundary_rule<Scalar>(shifted_s, step.p_s, τ);
     α = α_max;
 
     // If maximum step size is below minimum, invoke feasibility restoration
@@ -472,17 +475,16 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
     // αₖᶻ = max(α ∈ (0, 1] : zₖ + αpₖᶻ ≥ (1−τⱼ)zₖ)
     α_z = fraction_to_the_boundary_rule<Scalar>(z, step.p_z, τ);
 
-    const FilterEntry<Scalar> current_entry{f, s, c_e, c_i, μ, μ * Scalar(1e-3)};
+    const FilterEntry<Scalar> current_entry{f, s, c_e, c_i, μ, μ_B};
 
     // Compute the directional derivative of the log-barrier function along the
     // search direction.
     //
-    //   ϕ_μ(x, s) = f(x) − μ∑ᵢ ln(sᵢ)
+    //   ϕ_μ(x, s) = f(x) − μ∑ᵢ ln(sᵢ + μ_B)
     //
     //   D_ϕ = ∇ϕ_μ(x, s)ᵀ[pˣ pˢ]
-    //       = ∇f(x)ᵀpˣ − μ∑ᵢ pᵢˢ/sᵢ
-    const Scalar D_ϕ =
-        g.transpose() * step.p_x - μ * s.cwiseInverse().dot(step.p_s);
+    //       = ∇f(x)ᵀpˣ − μ∑ᵢ pᵢˢ/(sᵢ + μ_B)
+    const Scalar D_ϕ = g.transpose() * step.p_x - μ * inv_shifted_s.dot(step.p_s);
 
     // Loop until a step is accepted
     while (1) {
@@ -518,7 +520,7 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
       }
 
       // Check whether filter accepts trial iterate
-      FilterEntry trial_entry{trial_f, trial_s, trial_c_e, trial_c_i, μ, μ * Scalar(1e-3)};
+      FilterEntry trial_entry{trial_f, trial_s, trial_c_e, trial_c_i, μ, μ_B};
       if (filter.try_add(current_entry, trial_entry, D_ϕ, α)) {
         // Accept step
         break;
@@ -564,7 +566,8 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
                   trial_f,
                   trial_c_e.template lpNorm<1>() +
                       (trial_c_i - trial_s).template lpNorm<1>(),
-                  trial_s.dot(trial_z), μ, solver.hessian_regularization(),
+                  (trial_s.array() + μ_B).matrix().dot(trial_z), μ,
+                  solver.hessian_regularization(),
                   solver.constraint_jacobian_regularization(),
                   std::max(soc_step.p_x.template lpNorm<Eigen::Infinity>(),
                            soc_step.p_s.template lpNorm<Eigen::Infinity>()),
@@ -576,8 +579,8 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
 
           // Rebuild Newton-KKT rhs with updated constraint values.
           //
-          // rhs = −[∇f − Aₑᵀy − Aᵢᵀ(μS⁻¹e − Σ(cᵢ − s)ˢᵒᶜ)]
-          //        [               cₑˢᵒᶜ                 ]
+          // rhs = −[∇f − Aₑᵀy − Aᵢᵀ(μ ⊘ (s + μ_B) − Σ(cᵢ − s)ˢᵒᶜ)]
+          //        [                    cₑˢᵒᶜ                    ]
           //
           // where
           //
@@ -588,7 +591,7 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
           c_i_minus_s_soc = α_soc * c_i_minus_s_soc + trial_c_i - trial_s;
           rhs.segment(0, x.rows()) =
               -g + A_e.transpose() * y +
-              A_i.transpose() * (μ * s.cwiseInverse() - Σ * c_i_minus_s_soc);
+              A_i.transpose() * (μ * inv_shifted_s - Σ * c_i_minus_s_soc);
           rhs.segment(x.rows(), y.rows()) = -c_e_soc;
 
           // Solve the Newton-KKT system
@@ -596,7 +599,7 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
 
           // αˢᵒᶜ = max(α ∈ (0, 1] : sₖ + αpₖˢ ≥ (1−τⱼ)sₖ)
           // αₖᶻˢᵒᶜ = max(α ∈ (0, 1] : zₖ + αpₖᶻ ≥ (1−τⱼ)zₖ)
-          α_soc = fraction_to_the_boundary_rule<Scalar>(s, soc_step.p_s, τ);
+          α_soc = fraction_to_the_boundary_rule<Scalar>(shifted_s, soc_step.p_s, τ);
           α_z_soc = fraction_to_the_boundary_rule<Scalar>(z, soc_step.p_z, τ);
 
           trial_x = x + α_soc * soc_step.p_x;
@@ -609,7 +612,7 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
           trial_c_i = matrices.c_i(trial_x);
 
           // Check whether filter accepts trial iterate
-          FilterEntry trial_entry{trial_f, trial_s, trial_c_e, trial_c_i, μ, μ * Scalar(1e-3)};
+          FilterEntry trial_entry{trial_f, trial_s, trial_c_e, trial_c_i, μ, μ_B};
           if (filter.try_add(current_entry, trial_entry, D_ϕ, α)) {
             step = soc_step;
             α = α_soc;
@@ -666,7 +669,7 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
       // wasn't, invoke feasibility restoration.
       if (α < α_min) {
         Scalar current_kkt_error = kkt_error<Scalar, KKTErrorType::ONE_NORM>(
-            g, A_e, c_e, A_i, c_i, s, y, z, μ);
+            g, A_e, c_e, A_i, c_i, s, y, z, μ, μ_B);
 
         trial_x = x + α_max * step.p_x;
         trial_s = s + α_max * step.p_s;
@@ -679,7 +682,8 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
 
         Scalar next_kkt_error = kkt_error<Scalar, KKTErrorType::ONE_NORM>(
             matrices.g(trial_x), matrices.A_e(trial_x), trial_c_e,
-            matrices.A_i(trial_x), trial_c_i, trial_s, trial_y, trial_z, μ);
+            matrices.A_i(trial_x), trial_c_i, trial_s, trial_y, trial_z, μ,
+            μ_B);
 
         // If the step using αᵐᵃˣ reduced the KKT error, accept it anyway
         if (next_kkt_error <= Scalar(0.999) * current_kkt_error) {
@@ -745,6 +749,14 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
       f = matrices.f(x);
       c_e = matrices.c_e(x);
       c_i = matrices.c_i(x);
+
+      shifted_s = s.array() + (μ * Scalar(1e-3));
+
+      for (int row = 0; row < z.rows(); ++row) {
+        constexpr Scalar κ_Σ(1e10);
+        z[row] = std::clamp(z[row], Scalar(1) / κ_Σ * μ / shifted_s[row],
+                            κ_Σ * μ / shifted_s[row]);
+      }
     } else {
       // If full step was accepted, reset full-step rejected counter
       if (α == α_max) {
@@ -760,6 +772,8 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
       for (int i = 0; i < s.rows(); ++i) {
         s[i] = std::max(s[i], c_i[i] - matrices.scaling.f * options.tolerance * z[i]);
       }
+
+      shifted_s = s.array() + μ_B;
 
       // A requirement for the convergence proof is that the primal-dual barrier
       // term Hessian Σₖ₊₁ does not deviate arbitrarily much from the primal
@@ -777,7 +791,7 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
       for (int row = 0; row < z.rows(); ++row) {
         constexpr Scalar κ_Σ(1e10);
         z[row] =
-            std::clamp(z[row], Scalar(1) / κ_Σ * μ / s[row], κ_Σ * μ / s[row]);
+            std::clamp(z[row], Scalar(1) / κ_Σ * μ / shifted_s[row], κ_Σ * μ / shifted_s[row]);
       }
 
       f = trial_f;
@@ -803,11 +817,11 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
       // While the error is below the desired threshold for this barrier
       // parameter value, decrease the barrier parameter further
       Scalar E_μ = kkt_error<Scalar, KKTErrorType::INF_NORM_SCALED>(
-          g, A_e, c_e, A_i, c_i, s, y, z, μ);
+          g, A_e, c_e, A_i, c_i, s, y, z, μ, μ_B);
       while (μ > μ_min && E_μ <= κ_ε * μ) {
         update_barrier_parameter_and_reset_filter();
-        E_μ = kkt_error<Scalar, KKTErrorType::INF_NORM_SCALED>(g, A_e, c_e, A_i,
-                                                               c_i, s, y, z, μ);
+        E_μ = kkt_error<Scalar, KKTErrorType::INF_NORM_SCALED>(
+            g, A_e, c_e, A_i, c_i, s, y, z, μ, μ * Scalar(1e-3));
       }
     }
 
@@ -819,7 +833,7 @@ ExitStatus ipm(const IPMMatrixCallbacks<Scalar>& matrix_callbacks,
           in_feasibility_restoration ? IterationType::FEASIBILITY_RESTORATION
                                      : IterationType::NORMAL,
           inner_iter_profiler.current_duration(), E_0, f,
-          c_e.template lpNorm<1>() + (c_i - s).template lpNorm<1>(), s.dot(z),
+          c_e.template lpNorm<1>() + (c_i - s).template lpNorm<1>(), shifted_s.dot(z),
           μ, solver.hessian_regularization(),
           solver.constraint_jacobian_regularization(),
           std::max(step.p_x.template lpNorm<Eigen::Infinity>(),
