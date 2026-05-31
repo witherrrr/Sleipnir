@@ -89,8 +89,6 @@ Scalar kkt_error(const Eigen::Vector<Scalar, Eigen::Dynamic>& g,
 /// @param y Equality constraint dual variables.
 /// @param z Inequality constraint dual variables.
 /// @param μ Barrier parameter.
-/// @param μ_B Barrier shift (so complementarity becomes (s+μ_B)·z = μ). Zero
-///     for the unshifted formulation.
 template <typename Scalar, KKTErrorType T>
 Scalar kkt_error(const Eigen::Vector<Scalar, Eigen::Dynamic>& g,
                  const Eigen::SparseMatrix<Scalar>& A_e,
@@ -99,22 +97,13 @@ Scalar kkt_error(const Eigen::Vector<Scalar, Eigen::Dynamic>& g,
                  const Eigen::Vector<Scalar, Eigen::Dynamic>& c_i,
                  const Eigen::Vector<Scalar, Eigen::Dynamic>& s,
                  const Eigen::Vector<Scalar, Eigen::Dynamic>& y,
-                 const Eigen::Vector<Scalar, Eigen::Dynamic>& z, Scalar μ,
-                 Scalar μ_B = Scalar(0)) {
-  // The KKT conditions from docs/algorithms.md, with the shifted complementarity
-  // perturbation (s + μ_B)·z − μe = 0 from the shifted primal-dual penalty-
-  // barrier method:
+                 const Eigen::Vector<Scalar, Eigen::Dynamic>& z, Scalar μ) {
+  // The KKT conditions from docs/algorithms.md:
   //
   //   ∇f − Aₑᵀy − Aᵢᵀz = 0
-  //   (S + μ_B I)z − μe = 0
+  //   Sz − μe = 0
   //   cₑ = 0
   //   cᵢ − s = 0
-
-  using DenseVector = Eigen::Vector<Scalar, Eigen::Dynamic>;
-
-  const DenseVector shifted_s = s.array() + μ_B;
-  const DenseVector comp = shifted_s.cwiseProduct(z) -
-                           DenseVector::Constant(s.rows(), μ);
 
   if constexpr (T == KKTErrorType::INF_NORM_SCALED) {
     // See equation (5) of [2].
@@ -130,20 +119,28 @@ Scalar kkt_error(const Eigen::Vector<Scalar, Eigen::Dynamic>& g,
     Scalar s_c =
         std::max(s_max, z.template lpNorm<1>() / Scalar(z.rows())) / s_max;
 
+    const auto S = s.asDiagonal();
+    const Eigen::Vector<Scalar, Eigen::Dynamic> μe =
+        Eigen::Vector<Scalar, Eigen::Dynamic>::Constant(s.rows(), μ);
+
     // ‖∇f − Aₑᵀy − Aᵢᵀz‖_∞ / s_d
-    // ‖(S+μ_B I)z − μe‖_∞ / s_c
+    // ‖Sz − μe‖_∞ / s_c
     // ‖cₑ‖_∞
     // ‖cᵢ − s‖_∞
     return std::max({(g - A_e.transpose() * y - A_i.transpose() * z)
                              .template lpNorm<Eigen::Infinity>() /
                          s_d,
-                     comp.template lpNorm<Eigen::Infinity>() / s_c,
+                     (S * z - μe).template lpNorm<Eigen::Infinity>() / s_c,
                      c_e.template lpNorm<Eigen::Infinity>(),
                      (c_i - s).template lpNorm<Eigen::Infinity>()});
   } else if constexpr (T == KKTErrorType::ONE_NORM) {
+    const auto S = s.asDiagonal();
+    const Eigen::Vector<Scalar, Eigen::Dynamic> μe =
+        Eigen::Vector<Scalar, Eigen::Dynamic>::Constant(s.rows(), μ);
+
     return (g - A_e.transpose() * y - A_i.transpose() * z)
                .template lpNorm<1>() +
-           comp.template lpNorm<1>() + c_e.template lpNorm<1>() +
+           (S * z - μe).template lpNorm<1>() + c_e.template lpNorm<1>() +
            (c_i - s).template lpNorm<1>();
   }
 }
@@ -216,8 +213,6 @@ Scalar unscaled_kkt_error(const ProblemScaling<Scalar>& scaling,
 /// @param y Scaled equality constraint dual variables.
 /// @param z Scaled inequality constraint dual variables.
 /// @param μ Scaled barrier parameter.
-/// @param μ_B Scaled barrier shift (so complementarity becomes
-///     (s+μ_B)·z = μ). Zero for the unshifted formulation.
 template <typename Scalar, KKTErrorType T>
 Scalar unscaled_kkt_error(const ProblemScaling<Scalar>& scaling,
                           const Eigen::Vector<Scalar, Eigen::Dynamic>& g,
@@ -228,12 +223,12 @@ Scalar unscaled_kkt_error(const ProblemScaling<Scalar>& scaling,
                           const Eigen::Vector<Scalar, Eigen::Dynamic>& s,
                           const Eigen::Vector<Scalar, Eigen::Dynamic>& y,
                           const Eigen::Vector<Scalar, Eigen::Dynamic>& z,
-                          Scalar μ, Scalar μ_B = Scalar(0)) {
+                          Scalar μ) {
   using DenseVector = Eigen::Vector<Scalar, Eigen::Dynamic>;
   using SparseMatrix = Eigen::SparseMatrix<Scalar>;
 
   if (scaling.is_identity()) {
-    return kkt_error<Scalar, T>(g, A_e, c_e, A_i, c_i, s, y, z, μ, μ_B);
+    return kkt_error<Scalar, T>(g, A_e, c_e, A_i, c_i, s, y, z, μ);
   }
 
   const Scalar inv_d_f = Scalar(1) / scaling.f;
@@ -249,12 +244,10 @@ Scalar unscaled_kkt_error(const ProblemScaling<Scalar>& scaling,
   const DenseVector y_unscaled = scaling.c_e.cwiseProduct(y) * inv_d_f;
   const DenseVector z_unscaled = scaling.c_i.cwiseProduct(z) * inv_d_f;
   const Scalar μ_unscaled = inv_d_f * μ;
-  const Scalar μ_B_unscaled = inv_d_f * μ_B;
 
   return kkt_error<Scalar, T>(g_unscaled, A_e_unscaled, c_e_unscaled,
                               A_i_unscaled, c_i_unscaled, s_unscaled,
-                              y_unscaled, z_unscaled, μ_unscaled,
-                              μ_B_unscaled);
+                              y_unscaled, z_unscaled, μ_unscaled);
 }
 
 }  // namespace slp
